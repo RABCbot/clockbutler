@@ -12,7 +12,7 @@ from piper.voice import PiperVoice
 import subprocess
 import wave
 import RPi.GPIO as GPIO
-
+from cron_converter import Cron
 
 logging.basicConfig(
   format="%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
@@ -21,6 +21,7 @@ logging.basicConfig(
 
 class Butler:
   def __init__(self, config_file):
+    self.cron_dict = {}
     self.script_list = []
     self.favorite_dict = {}
     self.current_position = None
@@ -76,12 +77,10 @@ class Butler:
     while True:
       if GPIO.input(16) == False:
         logging.info('Button pressed')
-        filename = self.config["sounds_path"]
-        filename = os.path.join(filename, "beep.wav")
         prefix = self.config["mqtt_prefix"]
         action = self.get_current()
         await self.mqtt_client.publish(f"{prefix}/action", payload="button pressed")
-        await self.aplay(filename)
+        await self.play("beep")
 
       await asyncio.sleep(0.2)
 
@@ -103,6 +102,7 @@ class Butler:
             if message.topic.matches(f"{prefix}/volume"): await self.volume(payload)
             if message.topic.matches(f"{prefix}/play"): await self.play(payload)
             if message.topic.matches(f"{prefix}/scripts"): self.set_scripts(payload)
+            if message.topic.matches(f"{prefix}/cron/add"): self.cron_dict.update(json.loads(payload))
 
         except aiomqtt.MqttError as error:
           logging.info(f"Mqtt listener reconnecting...")
@@ -118,6 +118,18 @@ class Butler:
       now = datetime.now()
       logging.info(f"{now:%a, %b %d %H:%M %p}")
       await asyncio.sleep(interval)
+
+  async def cron_worker(self):
+    while True:
+      now = datetime.now()
+      for cron in self.cron_dict.keys():
+        if Cron(cron).validate(now): 
+          logging.info(f"Cron triggered at {now:%a, %b %d %H:%M:%S %p}")
+          action = self.cron_dict[cron]["action"]
+          payload = self.cron_dict[cron]["payload"]
+          if action == "say": await self.say(payload)
+          elif action == "play": await self.play(payload)
+      await asyncio.sleep(60)
 
   async def volume(self, level):
     try:
@@ -192,6 +204,8 @@ async def main():
     tg.create_task(b.gpi_listener())
     logging.info(f"Creating clock worker")
     tg.create_task(b.clock_worker())
+    logging.info(f"Creating cron worker")
+    tg.create_task(b.cron_worker())
   logging.info(f"Main loop completed.")
 
 if __name__ == "__main__":
